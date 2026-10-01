@@ -1,0 +1,6 @@
+{
+  "name": "KASIR UMKM",
+  "description": "Aplikasi Web Full-Stack Kasir & Manajemen Toko UMKM Lengkap: POS, Scan Barcode, Stok, Order Online, Nomor Meja, Absensi Barcode, Penggajian, Cetak Struk & Laporan.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
