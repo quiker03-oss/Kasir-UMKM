@@ -109,6 +109,9 @@ router.post('/checkout', (req: AuthRequest, res: Response) => {
       items,
       order_id,
       idempotency_key,
+      transaction_number,
+      created_at,
+      is_offline_sync,
     } = req.body;
 
     // Check idempotency cache to protect against rapid double clicks
@@ -116,6 +119,31 @@ router.post('/checkout', (req: AuthRequest, res: Response) => {
       const cached = idempotencyCache.get(`${storeId}:${idempotency_key}`);
       res.json(cached?.result);
       return;
+    }
+
+    // Check if offline transaction number was already synced
+    if (transaction_number) {
+      const existingTrx = queryOne(
+        'SELECT * FROM transactions WHERE transaction_number = ? AND store_id = ?',
+        [transaction_number, storeId]
+      );
+      if (existingTrx) {
+        const existingItems = query('SELECT * FROM transaction_items WHERE transaction_id = ?', [existingTrx.id]);
+        const storeInfo = queryOne(
+          'SELECT name, logo_url, address, phone, whatsapp, receipt_footer FROM stores WHERE id = ?',
+          [storeId]
+        );
+        res.json({
+          success: true,
+          message: 'Transaksi offline sudah tersimpan di database.',
+          receipt: {
+            ...existingTrx,
+            items: existingItems,
+            store: storeInfo,
+          },
+        });
+        return;
+      }
     }
 
     // Check if order was already paid
@@ -165,8 +193,8 @@ router.post('/checkout', (req: AuthRequest, res: Response) => {
         return;
       }
 
-      // If this transaction is NOT fulfilling an already-deducted order
-      if (!order_id && product.stock < qty) {
+      // If this transaction is NOT fulfilling an already-deducted order (allow offline sync to proceed without losing business data)
+      if (!order_id && !is_offline_sync && product.stock < qty) {
         res.status(400).json({
           success: false,
           message: `Stok produk "${product.name}" tidak mencukupi. Sisa stok: ${product.stock}, diminta: ${qty}.`,
@@ -208,9 +236,12 @@ router.post('/checkout', (req: AuthRequest, res: Response) => {
     const now = new Date();
     const dateCode = now.toISOString().split('T')[0].replace(/-/g, '');
     const randCode = Math.floor(1000 + Math.random() * 9000);
-    const trxNumber = `TRX-${dateCode}-${randCode}`;
+    const trxNumber =
+      transaction_number && typeof transaction_number === 'string'
+        ? transaction_number
+        : `TRX-${dateCode}-${randCode}`;
     const trxId = `trx-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    const nowIso = now.toISOString();
+    const nowIso = created_at && !isNaN(Date.parse(created_at)) ? created_at : now.toISOString();
 
     const result = transaction(() => {
       // 1. Insert transaction
@@ -258,7 +289,7 @@ router.post('/checkout', (req: AuthRequest, res: Response) => {
         );
 
         if (!order_id) {
-          const updatedStock = item.current_stock - item.quantity;
+          const updatedStock = Math.max(0, item.current_stock - item.quantity);
           run('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?', [updatedStock, nowIso, item.product_id]);
 
           run(
@@ -271,7 +302,7 @@ router.post('/checkout', (req: AuthRequest, res: Response) => {
               item.quantity,
               item.current_stock,
               updatedStock,
-              `Transaksi Kasir #${trxNumber}`,
+              is_offline_sync ? `Transaksi Kasir Offline #${trxNumber}` : `Transaksi Kasir #${trxNumber}`,
               nowIso,
             ]
           );
@@ -337,6 +368,179 @@ router.post('/checkout', (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     console.error('POS Checkout error:', err);
     res.status(500).json({ success: false, message: err.message || 'Gagal memproses transaksi kasir.' });
+  }
+});
+
+// Batch sync for offline POS queue
+router.post('/sync-batch', (req: AuthRequest, res: Response) => {
+  try {
+    const storeId = (req as any).storeId;
+    const { queue } = req.body;
+
+    if (!Array.isArray(queue) || queue.length === 0) {
+      res.json({ success: true, synced_ids: [], failed_items: [] });
+      return;
+    }
+
+    const syncedIds: string[] = [];
+    const failedItems: Array<{ id: string; error: string }> = [];
+
+    for (const item of queue) {
+      const qId = item.id;
+      const p = item.payload;
+
+      try {
+        if (!p || !Array.isArray(p.items) || p.items.length === 0) {
+          failedItems.push({ id: qId, error: 'Payload tidak valid atau keranjang kosong' });
+          continue;
+        }
+
+        // Check if already in DB
+        if (p.transaction_number) {
+          const existing = queryOne('SELECT id FROM transactions WHERE transaction_number = ? AND store_id = ?', [
+            p.transaction_number,
+            storeId,
+          ]);
+          if (existing) {
+            syncedIds.push(qId);
+            continue;
+          }
+        }
+
+        // Validate items and calculate
+        let subtotal = 0;
+        let totalCogs = 0;
+        const validatedItems: any[] = [];
+
+        for (const it of p.items) {
+          const product = queryOne(
+            'SELECT id, name, barcode, buy_price, sell_price, stock FROM products WHERE id = ? AND store_id = ?',
+            [it.product_id, storeId]
+          );
+
+          if (!product) {
+            continue;
+          }
+
+          const qty = Number(it.quantity) || 1;
+          const itemSubtotal = product.sell_price * qty;
+          subtotal += itemSubtotal;
+          totalCogs += product.buy_price * qty;
+
+          validatedItems.push({
+            product_id: product.id,
+            product_name: product.name,
+            barcode: product.barcode,
+            buy_price: product.buy_price,
+            sell_price: product.sell_price,
+            quantity: qty,
+            subtotal: itemSubtotal,
+            current_stock: product.stock,
+          });
+        }
+
+        if (validatedItems.length === 0) {
+          failedItems.push({ id: qId, error: 'Item dalam transaksi tidak ditemukan di database toko' });
+          continue;
+        }
+
+        const discountAmount = Math.max(0, Number(p.discount) || 0);
+        const totalAmount = Math.max(0, subtotal - discountAmount);
+        const actualPaid = p.payment_method === 'TUNAI' ? Number(p.amount_paid) || totalAmount : totalAmount;
+        const changeAmount = p.payment_method === 'TUNAI' ? Math.max(0, actualPaid - totalAmount) : 0;
+
+        const now = new Date();
+        const dateCode = now.toISOString().split('T')[0].replace(/-/g, '');
+        const randCode = Math.floor(1000 + Math.random() * 9000);
+        const trxNumber = p.transaction_number || `TRX-${dateCode}-${randCode}`;
+        const trxId = `trx-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const nowIso = p.created_at && !isNaN(Date.parse(p.created_at)) ? p.created_at : now.toISOString();
+
+        transaction(() => {
+          run(
+            `INSERT INTO transactions (id, store_id, transaction_number, order_id, cashier_id, cashier_name, customer_name, table_name, order_type, subtotal, discount, tax, total_amount, total_cogs, payment_method, amount_paid, change_amount, notes, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              trxId,
+              storeId,
+              trxNumber,
+              p.order_id || null,
+              req.user!.id,
+              req.user!.full_name,
+              p.customer_name ? p.customer_name.trim() : 'Pelanggan Umum',
+              p.table_name || null,
+              p.order_type || 'DINE_IN',
+              subtotal,
+              discountAmount,
+              totalAmount,
+              totalCogs,
+              p.payment_method || 'TUNAI',
+              actualPaid,
+              changeAmount,
+              p.notes || '',
+              nowIso,
+            ]
+          );
+
+          for (const vi of validatedItems) {
+            run(
+              `INSERT INTO transaction_items (id, transaction_id, product_id, product_name, barcode, buy_price, sell_price, quantity, subtotal)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                `ti-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+                trxId,
+                vi.product_id,
+                vi.product_name,
+                vi.barcode,
+                vi.buy_price,
+                vi.sell_price,
+                vi.quantity,
+                vi.subtotal,
+              ]
+            );
+
+            const updatedStock = Math.max(0, vi.current_stock - vi.quantity);
+            run('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?', [updatedStock, nowIso, vi.product_id]);
+
+            run(
+              `INSERT INTO inventory (id, store_id, product_id, type, quantity, previous_stock, current_stock, note, created_at)
+               VALUES (?, ?, ?, 'SALE', ?, ?, ?, ?, ?)`,
+              [
+                `inv-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+                storeId,
+                vi.product_id,
+                vi.quantity,
+                vi.current_stock,
+                updatedStock,
+                `Transaksi Kasir Offline #${trxNumber}`,
+                nowIso,
+              ]
+            );
+          }
+
+          run(
+            `INSERT INTO payments (id, store_id, reference_type, reference_id, payment_method, amount, status, created_at)
+             VALUES (?, ?, 'TRANSACTION', ?, ?, ?, 'SUCCESS', ?)`,
+            [`pay-${Date.now()}-${Math.floor(Math.random() * 1000)}`, storeId, trxId, p.payment_method || 'TUNAI', totalAmount, nowIso]
+          );
+        });
+
+        syncedIds.push(qId);
+      } catch (itemErr: any) {
+        console.error(`Error syncing offline transaction ${qId}:`, itemErr);
+        failedItems.push({ id: qId, error: itemErr.message || 'Error database' });
+      }
+    }
+
+    res.json({
+      success: true,
+      synced_ids: syncedIds,
+      failed_items: failedItems,
+      message: `${syncedIds.length} transaksi offline berhasil disinkronkan.`,
+    });
+  } catch (err: any) {
+    console.error('Batch sync error:', err);
+    res.status(500).json({ success: false, message: 'Gagal melakukan sinkronisasi batch.' });
   }
 });
 

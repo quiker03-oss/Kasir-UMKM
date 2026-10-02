@@ -16,6 +16,7 @@ interface ReceiptData {
   amount_paid: number;
   change_amount: number;
   notes?: string;
+  is_offline?: boolean;
   items: Array<{
     product_name: string;
     quantity: number;
@@ -120,6 +121,11 @@ export default function ReceiptPrintModal({ isOpen, onClose, receiptData }: Rece
           >
             {/* Store Info */}
             <div className="text-center mb-3">
+              {receiptData.is_offline && (
+                <div className="mb-2 py-0.5 px-1.5 bg-amber-100 border border-amber-300 text-amber-900 text-[9px] font-bold text-center rounded-sm">
+                  *** TRANSAKSI OFFLINE TERSIMPAN ***
+                </div>
+              )}
               {store.logo_url && (
                 <img
                   src={store.logo_url}

@@ -134,8 +134,8 @@ router.post('/orders', (req: Request, res: Response) => {
       return;
     }
 
-    if (!order_type || (order_type !== 'DINE_IN' && order_type !== 'TAKEAWAY')) {
-      res.status(400).json({ success: false, message: 'Pilih jenis pesanan: Makan di Tempat atau Bawa Pulang.' });
+    if (!order_type || (order_type !== 'DINE_IN' && order_type !== 'TAKEAWAY' && order_type !== 'DELIVERY')) {
+      res.status(400).json({ success: false, message: 'Pilih jenis pesanan: Makan di Tempat, Bawa Pulang, atau Pengiriman (Delivery).' });
       return;
     }
 

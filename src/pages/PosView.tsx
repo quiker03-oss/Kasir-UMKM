@@ -24,12 +24,23 @@ import {
   User,
   Clock,
   ArrowRight,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 import { api, playBeep } from '../lib/api.ts';
 import { Product, Category, TableItem } from '../types/index.ts';
 import BarcodeScannerModal from '../components/BarcodeScannerModal.tsx';
 import ReceiptPrintModal from '../components/ReceiptPrintModal.tsx';
 import ProductPhotoModal from '../components/ProductPhotoModal.tsx';
+import OfflineQueueModal from '../components/OfflineQueueModal.tsx';
+import {
+  enqueueOfflineTransaction,
+  getOfflineQueueCount,
+  syncOfflineQueue,
+  setupAutoSync,
+  cacheProductsLocally,
+  getCachedProductsLocally,
+} from '../lib/offlineQueue.ts';
 
 interface CartItem {
   product: Product;
@@ -107,6 +118,12 @@ export default function PosView() {
   const [photoModalProduct, setPhotoModalProduct] = useState<Product | null>(null);
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState(false);
 
+  // Offline Persistence Queue States (IndexedDB)
+  const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [offlineQueueCount, setOfflineQueueCount] = useState(0);
+  const [isSyncingQueue, setIsSyncingQueue] = useState(false);
+  const [isOfflineQueueModalOpen, setIsOfflineQueueModalOpen] = useState(false);
+
   const handlePhotoUpdated = (productId: string, newImageUrl: string) => {
     setProducts((prev) =>
       prev.map((p) => (p.id === productId ? { ...p, image_url: newImageUrl } : p))
@@ -146,7 +163,8 @@ export default function PosView() {
       !isHeldModalOpen &&
       !isHistoryModalOpen &&
       !isPhotoModalOpen &&
-      !isIncomingModalOpen
+      !isIncomingModalOpen &&
+      !isOfflineQueueModalOpen
     ) {
       const timer = setTimeout(() => {
         barcodeInputRef.current?.focus();
@@ -160,13 +178,73 @@ export default function PosView() {
     isHistoryModalOpen,
     isPhotoModalOpen,
     isIncomingModalOpen,
+    isOfflineQueueModalOpen,
   ]);
 
+  const handleSyncNow = async () => {
+    if (isSyncingQueue) return;
+    const user = api.getStoredUser();
+    try {
+      setIsSyncingQueue(true);
+      const res = await syncOfflineQueue(user?.store_id);
+      if (res.syncedCount > 0) {
+        showScanToast(`${res.syncedCount} transaksi offline berhasil disinkronkan ke server!`, 'success');
+        loadData();
+      } else if (res.failedCount > 0) {
+        showScanToast(`Sebagian transaksi belum tersinkron: ${res.errors[0] || 'Error'}`, 'error');
+      } else {
+        showScanToast('Semua transaksi offline sudah tersinkron.', 'success');
+      }
+      const cnt = await getOfflineQueueCount(user?.store_id);
+      setOfflineQueueCount(cnt);
+    } catch (err: any) {
+      showScanToast('Gagal sinkronisasi: ' + err.message, 'error');
+    } finally {
+      setIsSyncingQueue(false);
+    }
+  };
+
+  // Setup offline auto-sync & network listeners
   useEffect(() => {
     loadData();
     fetchIncomingOrders();
     const interval = setInterval(fetchIncomingOrders, 12000);
-    return () => clearInterval(interval);
+
+    const user = api.getStoredUser();
+    const storeId = user?.store_id;
+
+    // Load initial offline queue count
+    getOfflineQueueCount(storeId).then(setOfflineQueueCount);
+
+    // Setup auto-sync (runs on connection restore and background polling)
+    const cleanupAutoSync = setupAutoSync(storeId);
+
+    const handleQueueChange = () => {
+      getOfflineQueueCount(storeId).then(setOfflineQueueCount);
+    };
+
+    const handleOnlineEvent = () => {
+      setIsOnline(true);
+      showScanToast('Koneksi internet kembali! Memulai sinkronisasi otomatis...', 'success');
+      handleSyncNow();
+    };
+
+    const handleOfflineEvent = () => {
+      setIsOnline(false);
+      showScanToast('Koneksi internet terputus. POS beralih ke antrean offline IndexedDB.', 'error');
+    };
+
+    window.addEventListener('online', handleOnlineEvent);
+    window.addEventListener('offline', handleOfflineEvent);
+    window.addEventListener('pos:offline_queue_changed', handleQueueChange);
+
+    return () => {
+      clearInterval(interval);
+      cleanupAutoSync();
+      window.removeEventListener('online', handleOnlineEvent);
+      window.removeEventListener('offline', handleOfflineEvent);
+      window.removeEventListener('pos:offline_queue_changed', handleQueueChange);
+    };
   }, []);
 
   // Save held carts to localStorage whenever changed
@@ -186,7 +264,14 @@ export default function PosView() {
         api.getCategories(),
         api.getTables(),
       ]);
-      if (prodRes.success) setProducts(prodRes.products || []);
+      if (prodRes.success && prodRes.products) {
+        setProducts(prodRes.products);
+        // Cache products to IndexedDB so catalog search & barcode work even during total internet outage
+        const user = api.getStoredUser();
+        if (user?.store_id) {
+          cacheProductsLocally(user.store_id, prodRes.products);
+        }
+      }
       if (catRes.success) setCategories(catRes.categories || []);
       if (tblRes.success) {
         setTables(tblRes.tables || []);
@@ -195,7 +280,16 @@ export default function PosView() {
         }
       }
     } catch (err: any) {
-      console.error('POS load error:', err);
+      console.warn('POS load error, attempting recovery from IndexedDB offline cache:', err);
+      // Fallback: recover products from IndexedDB offline cache!
+      const user = api.getStoredUser();
+      if (user?.store_id) {
+        const cached = await getCachedProductsLocally(user.store_id);
+        if (cached && cached.length > 0) {
+          setProducts(cached);
+          showScanToast(`Memuat ${cached.length} produk dari cache IndexedDB offline.`, 'success');
+        }
+      }
     } finally {
       setLoading(false);
     }

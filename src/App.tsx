@@ -52,6 +52,32 @@ export default function App() {
   const [currentRoute, setCurrentRoute] = useState<AppRoute>('landing');
   const [productsFilterLowStock, setProductsFilterLowStock] = useState(false);
 
+  // Validate session against database on startup / page refresh
+  useEffect(() => {
+    const token = api.getStoredToken();
+    if (!token) return;
+
+    api
+      .getMe()
+      .then((res) => {
+        if (res.success && res.user) {
+          const freshUser: AuthUser = {
+            ...res.user,
+            name: res.user.full_name || res.user.name,
+          };
+          setCurrentUser(freshUser);
+          localStorage.setItem('kasir_umkm_user', JSON.stringify(freshUser));
+        }
+      })
+      .catch((err) => {
+        const msg = (err?.message || '').toLowerCase();
+        if (msg.includes('sesi') || msg.includes('autentikasi') || msg.includes('dinonaktifkan')) {
+          api.logout();
+          setCurrentUser(null);
+        }
+      });
+  }, []);
+
   // Handle URL Hash and Path routing
   useEffect(() => {
     const handleUrlRoute = () => {

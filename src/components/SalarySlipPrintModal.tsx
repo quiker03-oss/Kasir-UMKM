@@ -1,32 +1,46 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Printer,
   X,
-  Copy,
-  Check,
+  FileDown,
   Building2,
   Calendar,
   CheckCircle2,
   DollarSign,
   FileText,
   Share2,
+  Check,
+  RefreshCw,
+  AlertCircle,
+  User,
+  Clock,
 } from 'lucide-react';
-import { printHtmlDirect, terbilangRupiah } from '../lib/printer.ts';
+import { api } from '../lib/api.ts';
+import { terbilangRupiah } from '../lib/printer.ts';
+import { exportElementToPdf, printCleanDocument } from '../lib/pdfExport.ts';
 
 export interface SalarySlipData {
   payroll_number: string;
   period_month: number;
   period_year: number;
   paid_at?: string;
+  payment_status?: string;
   employee_id?: string;
   employee_name: string;
   position: string;
   barcode_id?: string;
   attendance_count: number;
+  // PENDAPATAN
   base_salary: number;
-  bonus: number;
-  overtime: number;
-  deductions: number;
+  allowance?: number; // Tunjangan
+  bonus: number; // Bonus
+  overtime: number; // Lembur
+  other_income?: number; // Pendapatan lainnya
+  // POTONGAN
+  deductions: number; // Potongan
+  cash_advance?: number; // Kasbon
+  other_deductions?: number; // Potongan lainnya
+  // TOTAL GAJI
   net_salary: number;
   notes?: string;
   store?: {
@@ -42,6 +56,9 @@ interface SalarySlipPrintModalProps {
   onClose: () => void;
   slipData: SalarySlipData | null;
   allSlips?: SalarySlipData[];
+  initialEmployeeId?: string;
+  initialMonth?: number;
+  initialYear?: number;
 }
 
 const MONTH_NAMES = [
@@ -63,30 +80,163 @@ const MONTH_NAMES = [
 export default function SalarySlipPrintModal({
   isOpen,
   onClose,
-  slipData,
+  slipData: propSlipData,
   allSlips = [],
+  initialEmployeeId,
+  initialMonth,
+  initialYear,
 }: SalarySlipPrintModalProps) {
+  const now = new Date();
+  const [selectedMonth, setSelectedMonth] = useState<number>(initialMonth || propSlipData?.period_month || now.getMonth() + 1);
+  const [selectedYear, setSelectedYear] = useState<number>(initialYear || propSlipData?.period_year || now.getFullYear());
+  const [selectedEmpId, setSelectedEmpId] = useState<string>(initialEmployeeId || propSlipData?.employee_id || '');
+
+  const [employeesList, setEmployeesList] = useState<any[]>([]);
+  const [currentSlip, setCurrentSlip] = useState<SalarySlipData | null>(propSlipData);
+  const [loading, setLoading] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedWhatsapp, setCopiedWhatsapp] = useState(false);
-  const [activeTab, setActiveTab] = useState<'single' | 'batch'>(
-    allSlips.length > 1 && !slipData ? 'batch' : 'single'
-  );
 
-  if (!isOpen || (!slipData && allSlips.length === 0)) return null;
+  const printableRef = useRef<HTMLDivElement>(null);
 
-  const currentSlip = slipData || allSlips[0];
-  const targetSlips = activeTab === 'single' ? (currentSlip ? [currentSlip] : []) : allSlips;
+  // Sync when propSlipData changes
+  useEffect(() => {
+    if (propSlipData) {
+      setCurrentSlip(propSlipData);
+      setSelectedMonth(propSlipData.period_month);
+      setSelectedYear(propSlipData.period_year);
+      if (propSlipData.employee_id) setSelectedEmpId(propSlipData.employee_id);
+    }
+  }, [propSlipData]);
 
-  const store = currentSlip.store || {
-    name: 'KASIR UMKM',
+  // Load employee list and slip if opened without direct slipData or when filter changes
+  useEffect(() => {
+    if (isOpen) {
+      loadSlipFromDb();
+    }
+  }, [isOpen, selectedMonth, selectedYear, selectedEmpId]);
+
+  const loadSlipFromDb = async () => {
+    // If propSlipData is provided and hasn't changed filter, keep it
+    if (propSlipData && !selectedEmpId) return;
+
+    try {
+      setLoading(true);
+      setErrorMessage(null);
+      const res = await api.querySalarySlip({
+        employee_id: selectedEmpId || undefined,
+        period_month: selectedMonth,
+        period_year: selectedYear,
+      });
+
+      if (res.success) {
+        if (res.employees) {
+          setEmployeesList(res.employees);
+          if (!selectedEmpId && res.employees.length > 0) {
+            setSelectedEmpId(res.employees[0].id);
+          }
+        }
+        if (res.slip) {
+          setCurrentSlip(res.slip);
+        } else if (!res.employees || res.employees.length === 0) {
+          setErrorMessage('Tidak ada data karyawan di toko ini.');
+        } else {
+          setErrorMessage('Tidak ada data penggajian untuk periode yang dipilih.');
+        }
+      } else {
+        setErrorMessage(res.message || 'Gagal memuat slip gaji dari database.');
+      }
+    } catch (err: any) {
+      console.error('Failed to load salary slip:', err);
+      setErrorMessage(err.message || 'Terjadi kesalahan saat memuat slip gaji.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePrint = () => {
+    if (!printableRef.current || !currentSlip) return;
+    try {
+      const html = printableRef.current.innerHTML;
+      const cleanEmpName = currentSlip.employee_name.replace(/\s+/g, '_');
+      const monthStr = MONTH_NAMES[currentSlip.period_month] || currentSlip.period_month;
+      const title = `Slip_Gaji_${cleanEmpName}_${monthStr}_${currentSlip.period_year}`;
+      printCleanDocument(html, title);
+    } catch (err: any) {
+      alert('Gagal mencetak: ' + (err.message || String(err)));
+    }
+  };
+
+  const handleSavePdf = async () => {
+    if (!printableRef.current || !currentSlip) return;
+    try {
+      setExportingPdf(true);
+      setErrorMessage(null);
+      const cleanEmpName = currentSlip.employee_name.replace(/[^a-zA-Z0-9]/g, '_');
+      const monthStr = MONTH_NAMES[currentSlip.period_month] || currentSlip.period_month;
+      // Auto file name pattern: Slip_Gaji_Ahmad_September_2026.pdf
+      const filename = `Slip_Gaji_${cleanEmpName}_${monthStr}_${currentSlip.period_year}.pdf`;
+
+      await exportElementToPdf(printableRef.current, {
+        filename,
+        orientation: 'portrait',
+      });
+    } catch (err: any) {
+      setErrorMessage('Gagal membuat PDF: ' + (err.message || 'Silakan coba lagi.'));
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
+  const handleCopyWhatsapp = () => {
+    if (!currentSlip) return;
+    const storeName = currentSlip.store?.name || 'Kasir UMKM';
+    const periodStr = `${MONTH_NAMES[currentSlip.period_month]} ${currentSlip.period_year}`;
+    const terbilang = terbilangRupiah(currentSlip.net_salary);
+
+    const text = `*SLIP GAJI KARYAWAN — ${storeName}*
+Periode: ${periodStr}
+No. Slip: ${currentSlip.payroll_number}
+
+*DATA KARYAWAN:*
+• Nama: *${currentSlip.employee_name}*
+• Jabatan: ${currentSlip.position}
+• ID Karyawan: ${currentSlip.barcode_id || currentSlip.employee_id || '-'}
+• Kehadiran: ${currentSlip.attendance_count} Hari Kerja
+
+*PENDAPATAN:*
+• Gaji Pokok: Rp ${Number(currentSlip.base_salary).toLocaleString('id-ID')}
+${(currentSlip.allowance || 0) > 0 ? `• Tunjangan: + Rp ${Number(currentSlip.allowance).toLocaleString('id-ID')}\n` : ''}${Number(currentSlip.bonus || 0) > 0 ? `• Bonus: + Rp ${Number(currentSlip.bonus).toLocaleString('id-ID')}\n` : ''}${Number(currentSlip.overtime || 0) > 0 ? `• Lembur: + Rp ${Number(currentSlip.overtime).toLocaleString('id-ID')}\n` : ''}${(currentSlip.other_income || 0) > 0 ? `• Pendapatan Lainnya: + Rp ${Number(currentSlip.other_income).toLocaleString('id-ID')}\n` : ''}
+*POTONGAN:*
+${Number(currentSlip.deductions || 0) > 0 ? `• Potongan: - Rp ${Number(currentSlip.deductions).toLocaleString('id-ID')}\n` : ''}${(currentSlip.cash_advance || 0) > 0 ? `• Kasbon: - Rp ${Number(currentSlip.cash_advance).toLocaleString('id-ID')}\n` : ''}${(currentSlip.other_deductions || 0) > 0 ? `• Potongan Lainnya: - Rp ${Number(currentSlip.other_deductions).toLocaleString('id-ID')}\n` : ''}
+*TOTAL GAJI (Gaji Bersih):*
+👉 *Rp ${Number(currentSlip.net_salary).toLocaleString('id-ID')}*
+_${terbilang}_
+
+Tanggal Pembayaran: ${currentSlip.paid_at ? new Date(currentSlip.paid_at).toLocaleDateString('id-ID') : '-'}
+Status: ${currentSlip.payment_status || 'Dibayar'}
+${currentSlip.notes ? `Catatan: ${currentSlip.notes}\n` : ''}
+Terima kasih atas kerja keras dan kontribusi Anda! 🙏`;
+
+    navigator.clipboard.writeText(text);
+    setCopiedWhatsapp(true);
+    setTimeout(() => setCopiedWhatsapp(false), 3000);
+  };
+
+  if (!isOpen) return null;
+
+  const store = currentSlip?.store || {
+    name: 'Kasir UMKM',
     address: 'Indonesia',
     phone: '',
   };
 
-  const periodString = `${MONTH_NAMES[currentSlip.period_month] || currentSlip.period_month} ${
-    currentSlip.period_year
-  }`;
+  const periodString = currentSlip
+    ? `${MONTH_NAMES[currentSlip.period_month] || currentSlip.period_month} ${currentSlip.period_year}`
+    : `${MONTH_NAMES[selectedMonth]} ${selectedYear}`;
 
-  const paymentDate = currentSlip.paid_at
+  const paymentDate = currentSlip?.paid_at
     ? new Date(currentSlip.paid_at).toLocaleDateString('id-ID', {
         day: 'numeric',
         month: 'long',
@@ -94,271 +244,162 @@ export default function SalarySlipPrintModal({
       })
     : new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
 
-  // Generate clean printable HTML
-  const generateSlipHtml = () => {
-    return targetSlips
-      .map((slip, idx) => {
-        const slipPeriod = `${MONTH_NAMES[slip.period_month] || slip.period_month} ${slip.period_year}`;
-        const slipStore = slip.store || store;
-        const terbilang = terbilangRupiah(slip.net_salary);
+  const paymentStatus = currentSlip?.payment_status || 'Dibayar';
 
-        return `
-          <div style="
-            max-width: 680px;
-            margin: 0 auto 30px auto;
-            padding: 24px;
-            background: #ffffff;
-            border: 2px solid #0f172a;
-            border-radius: 12px;
-            page-break-after: ${idx < targetSlips.length - 1 ? 'always' : 'auto'};
-            font-family: system-ui, -apple-system, sans-serif;
-            color: #0f172a;
-            box-sizing: border-box;
-          ">
-            <!-- Header Store -->
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 14px; border-bottom: 2px solid #0f172a;">
-              <div>
-                <h2 style="margin: 0; font-size: 18px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;">${slipStore.name}</h2>
-                <div style="font-size: 11px; color: #475569; margin-top: 3px;">${slipStore.address || ''}</div>
-                ${slipStore.phone ? `<div style="font-size: 11px; color: #475569;">Telp / WhatsApp: ${slipStore.phone}</div>` : ''}
-              </div>
-              <div style="text-align: right;">
-                <div style="display: inline-block; background: #0f172a; color: #ffffff; padding: 4px 14px; font-size: 12px; font-weight: 800; border-radius: 4px; text-transform: uppercase; letter-spacing: 1px;">
-                  SLIP GAJI
-                </div>
-                <div style="font-size: 10px; color: #64748b; margin-top: 5px; font-family: monospace; font-weight: 700;">No: ${slip.payroll_number}</div>
-              </div>
-            </div>
+  // Kalkulasi Pendapatan & Potongan
+  const baseSalary = Number(currentSlip?.base_salary || 0);
+  const allowance = Number(currentSlip?.allowance || 0);
+  const bonus = Number(currentSlip?.bonus || 0);
+  const overtime = Number(currentSlip?.overtime || 0);
+  const otherIncome = Number(currentSlip?.other_income || 0);
+  const totalPendapatan = baseSalary + allowance + bonus + overtime + otherIncome;
 
-            <!-- Employee Info Table -->
-            <table style="width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 12px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px;">
-              <tr>
-                <td style="padding: 6px 12px; width: 25%; color: #64748b;">Nama Karyawan</td>
-                <td style="padding: 6px 12px; width: 25%; font-weight: 700; color: #0f172a;">: ${slip.employee_name}</td>
-                <td style="padding: 6px 12px; width: 25%; color: #64748b;">Periode Gaji</td>
-                <td style="padding: 6px 12px; width: 25%; font-weight: 700; color: #0f172a;">: ${slipPeriod}</td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 12px; color: #64748b;">Jabatan / Peran</td>
-                <td style="padding: 6px 12px; font-weight: 600;">: ${slip.position}</td>
-                <td style="padding: 6px 12px; color: #64748b;">Kehadiran Absensi</td>
-                <td style="padding: 6px 12px; font-weight: 700; color: #059669;">: ${slip.attendance_count} Hari Kerja</td>
-              </tr>
-              ${slip.barcode_id ? `
-              <tr>
-                <td style="padding: 6px 12px; color: #64748b;">ID Barcode</td>
-                <td style="padding: 6px 12px; font-family: monospace; font-weight: 600;">: ${slip.barcode_id}</td>
-                <td style="padding: 6px 12px; color: #64748b;">Tanggal Cetak</td>
-                <td style="padding: 6px 12px; color: #475569;">: ${paymentDate}</td>
-              </tr>` : ''}
-            </table>
+  const deductions = Number(currentSlip?.deductions || 0);
+  const cashAdvance = Number(currentSlip?.cash_advance || 0);
+  const otherDeductions = Number(currentSlip?.other_deductions || 0);
+  const totalPotongan = deductions + cashAdvance + otherDeductions;
 
-            <!-- Salary Details Table -->
-            <table style="width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 12px;">
-              <thead>
-                <tr style="background: #0f172a; color: #ffffff;">
-                  <th style="padding: 8px 12px; text-align: left; font-size: 11px; text-transform: uppercase;">Komponen Penghasilan & Potongan</th>
-                  <th style="padding: 8px 12px; text-align: right; font-size: 11px; text-transform: uppercase; width: 160px;">Jumlah (Rp)</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr style="border-bottom: 1px solid #e2e8f0;">
-                  <td style="padding: 8px 12px;">1. Gaji Pokok</td>
-                  <td style="padding: 8px 12px; text-align: right; font-weight: 600;">Rp ${slip.base_salary.toLocaleString('id-ID')}</td>
-                </tr>
-                ${slip.bonus > 0 ? `
-                <tr style="border-bottom: 1px solid #e2e8f0; color: #047857;">
-                  <td style="padding: 8px 12px;">2. Tunjangan Kinerja / Bonus</td>
-                  <td style="padding: 8px 12px; text-align: right; font-weight: 600;">+ Rp ${slip.bonus.toLocaleString('id-ID')}</td>
-                </tr>` : ''}
-                ${slip.overtime > 0 ? `
-                <tr style="border-bottom: 1px solid #e2e8f0; color: #047857;">
-                  <td style="padding: 8px 12px;">3. Upah Lembur</td>
-                  <td style="padding: 8px 12px; text-align: right; font-weight: 600;">+ Rp ${slip.overtime.toLocaleString('id-ID')}</td>
-                </tr>` : ''}
-                ${slip.deductions > 0 ? `
-                <tr style="border-bottom: 1px solid #e2e8f0; color: #dc2626;">
-                  <td style="padding: 8px 12px;">4. Potongan (Kasbon / Keterlambatan / Pinjaman)</td>
-                  <td style="padding: 8px 12px; text-align: right; font-weight: 600;">- Rp ${slip.deductions.toLocaleString('id-ID')}</td>
-                </tr>` : ''}
-                <tr style="background: #f1f5f9; font-size: 13px; font-weight: 800; border-top: 2px solid #0f172a;">
-                  <td style="padding: 10px 12px;">TOTAL GAJI DITERIMA (TAKE HOME PAY)</td>
-                  <td style="padding: 10px 12px; text-align: right; color: #047857;">Rp ${slip.net_salary.toLocaleString('id-ID')}</td>
-                </tr>
-              </tbody>
-            </table>
-
-            <!-- Terbilang -->
-            <div style="padding: 8px 12px; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 6px; font-size: 11px; margin-bottom: 16px;">
-              <b>Terbilang:</b> <i># ${terbilang} #</i>
-            </div>
-
-            ${slip.notes ? `
-            <div style="font-size: 11px; color: #475569; margin-bottom: 18px; font-style: italic;">
-              Catatan: ${slip.notes}
-            </div>` : ''}
-
-            <!-- Signatures -->
-            <table style="width: 100%; border-collapse: collapse; margin-top: 24px; text-align: center; font-size: 11px;">
-              <tr>
-                <td style="width: 50%; padding-bottom: 50px; color: #64748b;">Penerima (Karyawan),</td>
-                <td style="width: 50%; padding-bottom: 50px; color: #64748b;">Pengelola Toko,</td>
-              </tr>
-              <tr>
-                <td style="font-weight: 700; text-decoration: underline;">${slip.employee_name}</td>
-                <td style="font-weight: 700; text-decoration: underline;">${slipStore.name}</td>
-              </tr>
-            </table>
-          </div>
-        `;
-      })
-      .join('');
-  };
-
-  const handlePrintSlip = () => {
-    const html = generateSlipHtml();
-    printHtmlDirect(
-      html,
-      activeTab === 'single'
-        ? `Slip-Gaji-${currentSlip.employee_name}-${periodString}`
-        : `Semua-Slip-Gaji-${periodString}`
-    );
-  };
-
-  const handleCopyWhatsapp = () => {
-    const terbilang = terbilangRupiah(currentSlip.net_salary);
-    const text = `*SLIP GAJI RESMI — ${store.name}*
-No. Slip: ${currentSlip.payroll_number}
-Periode: ${periodString}
-
-*DATA KARYAWAN:*
-• Nama: *${currentSlip.employee_name}*
-• Jabatan: ${currentSlip.position}
-• Kehadiran: ${currentSlip.attendance_count} Hari Kerja
-
-*RINCIAN GAJI:*
-• Gaji Pokok: Rp ${currentSlip.base_salary.toLocaleString('id-ID')}
-${currentSlip.bonus > 0 ? `• Tunjangan/Bonus: + Rp ${currentSlip.bonus.toLocaleString('id-ID')}\n` : ''}${currentSlip.overtime > 0 ? `• Lembur: + Rp ${currentSlip.overtime.toLocaleString('id-ID')}\n` : ''}${currentSlip.deductions > 0 ? `• Potongan/Kasbon: - Rp ${currentSlip.deductions.toLocaleString('id-ID')}\n` : ''}
-*TOTAL DITERIMA (Take Home Pay):*
-👉 *Rp ${currentSlip.net_salary.toLocaleString('id-ID')}*
-_${terbilang}_
-
-${currentSlip.notes ? `Catatan: ${currentSlip.notes}\n` : ''}Terima kasih atas kerja keras Anda bersama ${store.name}! 🙏`;
-
-    navigator.clipboard.writeText(text);
-    setCopiedWhatsapp(true);
-    setTimeout(() => setCopiedWhatsapp(false), 3000);
-  };
+  const netSalary = Number(currentSlip?.net_salary || totalPendapatan - totalPotongan);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/75 backdrop-blur-xs overflow-y-auto no-print">
-      <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col my-auto max-h-[92vh]">
-        {/* Header */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/80 backdrop-blur-xs overflow-y-auto no-print">
+      <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col my-auto max-h-[94vh]">
+        {/* Modal Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50">
-          <div className="flex items-center space-x-2.5">
-            <div className="w-9 h-9 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shadow-md shadow-emerald-600/20">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shadow-md shadow-emerald-600/20">
               <FileText className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-extrabold text-slate-900 text-sm">Cetak Slip Gaji Karyawan</h3>
-              <p className="text-[11px] text-slate-500">
-                Format resmi UMKM dengan rincian penghasilan, kehadiran absensi, dan tanda tangan
+              <h3 className="font-extrabold text-slate-900 text-base">Cetak Slip Gaji Karyawan</h3>
+              <p className="text-xs text-slate-500">
+                Data resmi dari database: Pendapatan, Potongan, Gaji Bersih, dan Terbilang Rupiah
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 transition-colors"
+            className="p-2 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Toolbar */}
-        <div className="px-6 py-3 bg-slate-100/70 border-b border-slate-200/70 flex flex-wrap items-center justify-between gap-3 text-xs">
-          {allSlips.length > 1 ? (
-            <div className="flex items-center space-x-1 bg-white p-1 rounded-xl border border-slate-200 shadow-2xs">
-              <button
-                onClick={() => setActiveTab('single')}
-                className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
-                  activeTab === 'single'
-                    ? 'bg-emerald-600 text-white shadow-xs'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                Slip {currentSlip.employee_name}
-              </button>
-              <button
-                onClick={() => setActiveTab('batch')}
-                className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
-                  activeTab === 'batch'
-                    ? 'bg-emerald-600 text-white shadow-xs'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                Cetak Semua ({allSlips.length} Slip)
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center space-x-2 text-slate-600 font-semibold">
+        {/* Filter / Pemilihan Karyawan & Periode Gaji */}
+        <div className="p-4 sm:p-5 bg-slate-100/70 border-b border-slate-200 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2 text-xs font-bold text-slate-700">
               <Calendar className="w-4 h-4 text-emerald-600" />
-              <span>Periode: {periodString}</span>
+              <span>Pilih Karyawan & Periode Penggajian</span>
             </div>
-          )}
-
-          {/* Quick WhatsApp Share Button */}
-          <button
-            onClick={handleCopyWhatsapp}
-            className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl font-bold transition-all flex items-center space-x-1.5 shadow-2xs"
-            title="Salin teks rincian slip gaji untuk dikirim ke chat WhatsApp karyawan"
-          >
-            {copiedWhatsapp ? (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Tersalin! Siap Paste di WA</span>
-              </>
-            ) : (
-              <>
-                <Share2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Salin Format WhatsApp</span>
-              </>
+            {currentSlip && (
+              <button
+                onClick={handleCopyWhatsapp}
+                className="px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer"
+                title="Salin rincian slip untuk dikirim ke WhatsApp"
+              >
+                {copiedWhatsapp ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Tersalin!</span>
+                  </>
+                ) : (
+                  <>
+                    <Share2 className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Salin Format WA</span>
+                  </>
+                )}
+              </button>
             )}
-          </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            {/* Karyawan Dropdown */}
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Pilih Karyawan</label>
+              <select
+                value={selectedEmpId}
+                onChange={(e) => setSelectedEmpId(e.target.value)}
+                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-semibold text-slate-800 focus:outline-hidden focus:border-emerald-500"
+              >
+                {employeesList.length === 0 && currentSlip && (
+                  <option value={currentSlip.employee_id || ''}>
+                    {currentSlip.employee_name} ({currentSlip.position})
+                  </option>
+                )}
+                {employeesList.map((emp) => (
+                  <option key={emp.id} value={emp.id}>
+                    {emp.name} — {emp.position}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Periode Bulan */}
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Bulan Gaji</label>
+              <select
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(Number(e.target.value))}
+                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-semibold text-slate-800 focus:outline-hidden focus:border-emerald-500"
+              >
+                {MONTH_NAMES.slice(1).map((m, idx) => (
+                  <option key={idx + 1} value={idx + 1}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Periode Tahun */}
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Tahun Gaji</label>
+              <select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(Number(e.target.value))}
+                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-semibold text-slate-800 focus:outline-hidden focus:border-emerald-500"
+              >
+                {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((yr) => (
+                  <option key={yr} value={yr}>
+                    {yr}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         </div>
 
-        {/* Slip Preview on Screen */}
-        <div className="p-6 bg-slate-100 max-h-[60vh] overflow-y-auto flex flex-col items-center">
-          {activeTab === 'batch' && allSlips.length > 1 ? (
-            <div className="w-full space-y-4">
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-800 flex items-center space-x-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>
-                  Pratinjau Cetak Massal: <b>{allSlips.length} slip gaji</b> akan dicetak dengan pemisah halaman
-                  (1 slip per lembar) untuk seluruh karyawan periode ini.
-                </span>
-              </div>
+        {/* Error notification */}
+        {errorMessage && (
+          <div className="mx-6 mt-4 p-3.5 bg-rose-50 border border-rose-200 rounded-2xl flex items-center space-x-2 text-xs text-rose-800">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+            <span>{errorMessage}</span>
+          </div>
+        )}
 
-              {allSlips.map((slip, i) => (
-                <div key={i} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-xs">
-                  <div className="flex justify-between items-center pb-2 border-b border-slate-100">
-                    <div>
-                      <h4 className="font-extrabold text-slate-900 text-sm">{slip.employee_name}</h4>
-                      <p className="text-[11px] text-slate-500">{slip.position}</p>
-                    </div>
-                    <div className="text-right">
-                      <span className="font-extrabold text-sm text-emerald-600">
-                        Rp {slip.net_salary.toLocaleString('id-ID')}
-                      </span>
-                      <p className="text-[10px] text-slate-400 font-mono">#{slip.payroll_number}</p>
-                    </div>
-                  </div>
-                </div>
-              ))}
+        {/* Document Preview (A4 / Neat Slip Gaji Layout) */}
+        <div className="p-4 sm:p-6 bg-slate-200/80 overflow-y-auto max-h-[60vh] flex flex-col items-center">
+          {loading ? (
+            <div className="py-20 flex flex-col items-center justify-center space-y-3">
+              <RefreshCw className="w-8 h-8 animate-spin text-emerald-600" />
+              <p className="text-xs text-slate-600 font-semibold">Mengambil data slip gaji dari database...</p>
+            </div>
+          ) : !currentSlip ? (
+            <div className="bg-white rounded-2xl border border-slate-300 p-12 text-center max-w-md w-full space-y-3 shadow-sm">
+              <AlertCircle className="w-10 h-10 text-amber-500 mx-auto" />
+              <h4 className="font-bold text-slate-800 text-sm">Tidak ada data untuk periode yang dipilih.</h4>
+              <p className="text-xs text-slate-500">
+                Pilih karyawan atau periode penggajian lain pada opsi di atas.
+              </p>
             </div>
           ) : (
-            <div className="bg-white p-6 sm:p-7 shadow-lg border border-slate-200/90 rounded-2xl w-full max-w-xl text-slate-900 text-xs space-y-4">
-              {/* Header Store */}
-              <div className="flex items-start justify-between pb-3.5 border-b-2 border-slate-900">
+            <div
+              ref={printableRef}
+              className="bg-white w-full max-w-[620px] p-6 sm:p-8 shadow-xl border border-slate-300 rounded-sm text-slate-900 font-sans text-xs space-y-4"
+              style={{ boxSizing: 'border-box' }}
+            >
+              {/* SLIP GAJI KARYAWAN HEADER */}
+              <div className="flex justify-between items-start border-b-2 border-slate-900 pb-3">
                 <div className="flex items-center space-x-3">
                   {store.logo_url && (
                     <img
@@ -368,144 +409,212 @@ ${currentSlip.notes ? `Catatan: ${currentSlip.notes}\n` : ''}Terima kasih atas k
                     />
                   )}
                   <div>
-                    <h2 className="font-black text-base uppercase tracking-tight text-slate-900">
+                    <h1 className="text-base font-black uppercase tracking-tight text-slate-900 m-0">
                       {store.name}
-                    </h2>
-                    <p className="text-[11px] text-slate-600">{store.address}</p>
+                    </h1>
+                    <p className="text-[11px] text-slate-600 mt-0.5">{store.address || 'Alamat Toko'}</p>
                     {store.phone && (
-                      <p className="text-[11px] text-slate-600">Telp: {store.phone}</p>
+                      <p className="text-[10px] text-slate-500">Telp / WA: {store.phone}</p>
                     )}
                   </div>
                 </div>
                 <div className="text-right">
-                  <span className="inline-block px-3 py-1 bg-slate-900 text-white font-black text-[11px] rounded-lg uppercase tracking-wider">
-                    SLIP GAJI
+                  <div className="inline-block bg-slate-900 text-white px-3 py-1 text-xs font-black uppercase tracking-wider rounded-sm">
+                    SLIP GAJI KARYAWAN
+                  </div>
+                  <p className="text-[11px] font-bold text-slate-800 mt-1">Periode: {periodString}</p>
+                  <p className="text-[10px] font-mono text-slate-500">No: {currentSlip.payroll_number}</p>
+                </div>
+              </div>
+
+              {/* Data Karyawan */}
+              <div className="bg-slate-50 border border-slate-200 p-3 rounded-lg grid grid-cols-2 gap-2 text-[11px]">
+                <div>
+                  <span className="text-slate-500 text-[10px] block">Nama Karyawan:</span>
+                  <span className="font-bold text-slate-900 text-xs">{currentSlip.employee_name}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 text-[10px] block">Jabatan:</span>
+                  <span className="font-semibold text-slate-800">{currentSlip.position}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 text-[10px] block">ID Karyawan:</span>
+                  <span className="font-mono font-semibold text-slate-800">
+                    {currentSlip.barcode_id || currentSlip.employee_id || '-'}
                   </span>
-                  <p className="text-[10px] font-mono font-bold text-slate-500 mt-1">
-                    No: {currentSlip.payroll_number}
-                  </p>
+                </div>
+                <div>
+                  <span className="text-slate-500 text-[10px] block">Kehadiran (Absensi):</span>
+                  <span className="font-bold text-emerald-700">{currentSlip.attendance_count} Hari Kerja</span>
                 </div>
               </div>
 
-              {/* Employee Info */}
-              <div className="grid grid-cols-2 gap-2 p-3 bg-slate-50 border border-slate-200 rounded-xl text-[11px]">
-                <div>
-                  <span className="text-slate-400 block text-[10px]">Nama Karyawan:</span>
-                  <p className="font-bold text-slate-900 text-xs">{currentSlip.employee_name}</p>
-                </div>
-                <div>
-                  <span className="text-slate-400 block text-[10px]">Jabatan / Peran:</span>
-                  <p className="font-semibold text-slate-800">{currentSlip.position}</p>
-                </div>
-                <div>
-                  <span className="text-slate-400 block text-[10px]">Periode Penggajian:</span>
-                  <p className="font-semibold text-slate-800">{periodString}</p>
-                </div>
-                <div>
-                  <span className="text-slate-400 block text-[10px]">Kehadiran (Absensi):</span>
-                  <p className="font-bold text-emerald-700">{currentSlip.attendance_count} Hari Kerja</p>
-                </div>
-              </div>
-
-              {/* Breakdown Table */}
-              <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
-                <div className="bg-slate-900 text-white px-3.5 py-2 font-bold text-[11px] flex justify-between">
-                  <span>KOMPONEN PENGHASILAN</span>
+              {/* PENDAPATAN SECTION */}
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="bg-slate-900 text-white px-3 py-1.5 font-bold text-[11px] uppercase tracking-wider flex justify-between">
+                  <span>PENDAPATAN</span>
                   <span>JUMLAH</span>
                 </div>
-                <div className="p-3.5 space-y-2 text-[11px] bg-white">
-                  <div className="flex justify-between text-slate-700">
-                    <span>1. Gaji Pokok</span>
-                    <span className="font-bold">
-                      Rp {currentSlip.base_salary.toLocaleString('id-ID')}
-                    </span>
+                <div className="p-3 space-y-1.5 bg-white text-[11px]">
+                  <div className="flex justify-between text-slate-800">
+                    <span>• Gaji Pokok</span>
+                    <span className="font-semibold font-mono">Rp {baseSalary.toLocaleString('id-ID')}</span>
                   </div>
-                  {currentSlip.bonus > 0 && (
+                  {allowance > 0 && (
                     <div className="flex justify-between text-emerald-700">
-                      <span>2. Tunjangan / Bonus</span>
-                      <span className="font-bold">+ Rp {currentSlip.bonus.toLocaleString('id-ID')}</span>
+                      <span>• Tunjangan</span>
+                      <span className="font-semibold font-mono">+ Rp {allowance.toLocaleString('id-ID')}</span>
                     </div>
                   )}
-                  {currentSlip.overtime > 0 && (
+                  {bonus > 0 && (
                     <div className="flex justify-between text-emerald-700">
-                      <span>3. Upah Lembur</span>
-                      <span className="font-bold">
-                        + Rp {currentSlip.overtime.toLocaleString('id-ID')}
-                      </span>
+                      <span>• Bonus</span>
+                      <span className="font-semibold font-mono">+ Rp {bonus.toLocaleString('id-ID')}</span>
                     </div>
                   )}
-                  {currentSlip.deductions > 0 && (
-                    <div className="flex justify-between text-rose-600">
-                      <span>4. Potongan (Kasbon / Absen)</span>
-                      <span className="font-bold">
-                        - Rp {currentSlip.deductions.toLocaleString('id-ID')}
-                      </span>
+                  {overtime > 0 && (
+                    <div className="flex justify-between text-emerald-700">
+                      <span>• Lembur</span>
+                      <span className="font-semibold font-mono">+ Rp {overtime.toLocaleString('id-ID')}</span>
                     </div>
                   )}
-                  <div className="border-t-2 border-slate-900 pt-2.5 flex justify-between font-black text-sm text-slate-900 bg-slate-50 -mx-3.5 -mb-3.5 p-3.5">
-                    <span>TOTAL DITERIMA (TAKE HOME PAY)</span>
-                    <span className="text-emerald-700 font-extrabold text-base">
-                      Rp {currentSlip.net_salary.toLocaleString('id-ID')}
-                    </span>
+                  {otherIncome > 0 && (
+                    <div className="flex justify-between text-emerald-700">
+                      <span>• Pendapatan lainnya</span>
+                      <span className="font-semibold font-mono">+ Rp {otherIncome.toLocaleString('id-ID')}</span>
+                    </div>
+                  )}
+                  <div className="border-t border-slate-200 pt-1.5 flex justify-between font-bold text-slate-900">
+                    <span>Total Pendapatan</span>
+                    <span className="text-emerald-700 font-mono">Rp {totalPendapatan.toLocaleString('id-ID')}</span>
                   </div>
+                </div>
+              </div>
+
+              {/* POTONGAN SECTION */}
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="bg-rose-900 text-white px-3 py-1.5 font-bold text-[11px] uppercase tracking-wider flex justify-between">
+                  <span>POTONGAN</span>
+                  <span>JUMLAH</span>
+                </div>
+                <div className="p-3 space-y-1.5 bg-white text-[11px]">
+                  {deductions > 0 ? (
+                    <div className="flex justify-between text-rose-700">
+                      <span>• Potongan</span>
+                      <span className="font-semibold font-mono">- Rp {deductions.toLocaleString('id-ID')}</span>
+                    </div>
+                  ) : (
+                    <div className="flex justify-between text-slate-500 italic">
+                      <span>• Potongan</span>
+                      <span className="font-mono">Rp 0</span>
+                    </div>
+                  )}
+                  {cashAdvance > 0 && (
+                    <div className="flex justify-between text-rose-700">
+                      <span>• Kasbon</span>
+                      <span className="font-semibold font-mono">- Rp {cashAdvance.toLocaleString('id-ID')}</span>
+                    </div>
+                  )}
+                  {otherDeductions > 0 && (
+                    <div className="flex justify-between text-rose-700">
+                      <span>• Potongan lainnya</span>
+                      <span className="font-semibold font-mono">- Rp {otherDeductions.toLocaleString('id-ID')}</span>
+                    </div>
+                  )}
+                  <div className="border-t border-slate-200 pt-1.5 flex justify-between font-bold text-slate-900">
+                    <span>Total Potongan</span>
+                    <span className="text-rose-700 font-mono">- Rp {totalPotongan.toLocaleString('id-ID')}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* TOTAL GAJI (Gaji Bersih / Take Home Pay) */}
+              <div className="bg-slate-900 text-white p-3.5 rounded-lg flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] text-slate-300 uppercase tracking-wider block font-bold">
+                    TOTAL GAJI (GAJI BERSIH)
+                  </span>
+                  <span className="text-[10px] text-emerald-400 font-medium">Take Home Pay</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-base sm:text-lg font-black text-emerald-400 font-mono tracking-tight">
+                    Rp {netSalary.toLocaleString('id-ID')}
+                  </span>
                 </div>
               </div>
 
               {/* Terbilang */}
-              <div className="p-2.5 bg-emerald-50/70 border border-emerald-200 rounded-xl text-[11px] text-emerald-900">
+              <div className="p-2.5 bg-emerald-50/70 border border-emerald-200 rounded-lg text-[11px] text-emerald-950">
                 <span className="font-bold">Terbilang: </span>
-                <span className="italic font-medium">#{terbilangRupiah(currentSlip.net_salary)}#</span>
+                <span className="italic font-medium">#{terbilangRupiah(netSalary)}#</span>
+              </div>
+
+              {/* Info Tambahan */}
+              <div className="flex justify-between items-center text-[10px] text-slate-500 pt-1 border-t border-slate-100">
+                <span>Tanggal Pembayaran: <b>{paymentDate}</b></span>
+                <span>Status Pembayaran: <b className="text-emerald-700 uppercase">{paymentStatus}</b></span>
               </div>
 
               {currentSlip.notes && (
-                <div className="p-2 bg-amber-50 rounded-lg border border-amber-200 text-[11px] text-slate-600 italic">
+                <div className="p-2 bg-amber-50 rounded-lg border border-amber-200 text-[10px] text-slate-600 italic">
                   Catatan: {currentSlip.notes}
                 </div>
               )}
 
-              {/* Signature */}
-              <div className="grid grid-cols-2 gap-4 text-center pt-3 border-t border-slate-200 text-[11px]">
+              {/* Signatures */}
+              <div className="grid grid-cols-2 gap-4 text-center pt-4 border-t border-slate-300 text-[11px]">
                 <div>
-                  <p className="text-slate-500 mb-10">Penerima (Karyawan),</p>
-                  <p className="font-bold border-t border-slate-400 mx-6 pt-1">
+                  <p className="text-slate-500 mb-12">Penerima (Karyawan),</p>
+                  <p className="font-bold border-t border-slate-400 mx-6 pt-1 text-slate-900">
                     {currentSlip.employee_name}
                   </p>
                 </div>
                 <div>
-                  <p className="text-slate-500 mb-10">
+                  <p className="text-slate-500 mb-12">
                     {paymentDate}
                     <br />
                     Pengelola Toko,
                   </p>
-                  <p className="font-bold border-t border-slate-400 mx-6 pt-1">{store.name}</p>
+                  <p className="font-bold border-t border-slate-400 mx-6 pt-1 text-slate-900">
+                    {store.name}
+                  </p>
                 </div>
               </div>
             </div>
           )}
         </div>
 
-        {/* Modal Actions */}
-        <div className="px-6 py-4 border-t border-slate-100 bg-white flex flex-col sm:flex-row items-center justify-between gap-3">
+        {/* Modal Actions Footer */}
+        <div className="px-6 py-4 border-t border-slate-200 bg-white flex flex-col sm:flex-row items-center justify-between gap-3">
           <p className="text-xs text-slate-500 text-center sm:text-left">
-            Dapat dicetak langsung ke printer fisik atau disimpan sebagai PDF.
+            Format slip rapi cocok untuk printer thermal atau printer A4/Letter standar.
           </p>
-          <div className="flex items-center space-x-2 w-full sm:w-auto">
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
             <button
               onClick={onClose}
-              className="flex-1 sm:flex-initial px-4 py-2.5 border border-slate-200 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-bold transition-colors"
+              className="flex-1 sm:flex-initial px-4 py-2.5 border border-slate-200 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
             >
               Tutup
             </button>
+
             <button
-              onClick={handlePrintSlip}
-              className="flex-1 sm:flex-initial px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center justify-center space-x-2 shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+              onClick={handleSavePdf}
+              disabled={loading || !currentSlip || exportingPdf}
+              className="flex-1 sm:flex-initial px-4 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center space-x-1.5 shadow-2xs transition-colors cursor-pointer"
+              title="Simpan slip gaji sebagai file PDF asli"
+            >
+              <FileDown className="w-4 h-4" />
+              <span>{exportingPdf ? 'Membuat PDF...' : 'Simpan sebagai PDF'}</span>
+            </button>
+
+            <button
+              onClick={handlePrint}
+              disabled={loading || !currentSlip}
+              className="flex-1 sm:flex-initial px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center space-x-1.5 shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+              title="Cetak slip gaji langsung ke printer"
             >
               <Printer className="w-4 h-4" />
-              <span>
-                {activeTab === 'single'
-                  ? 'Cetak Slip Gaji'
-                  : `Cetak Semua (${allSlips.length} Slip)`}
-              </span>
+              <span>Cetak Slip</span>
             </button>
           </div>
         </div>

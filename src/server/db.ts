@@ -1,11 +1,14 @@
-import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
+import initSqlJs from 'sql.js';
 import fs from 'fs';
 import path from 'path';
 import { SCHEMA_SQL } from './schema.ts';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+type SqlJsDatabase = any;
+
+const isVercel = Boolean(process.env.VERCEL);
+const DATA_DIR = isVercel ? path.join('/tmp', 'kasir_data') : path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'kasir_umkm.sqlite');
-const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+const BACKUP_DIR = isVercel ? path.join('/tmp', 'kasir_backups') : path.join(DATA_DIR, 'backups');
 
 let dbInstance: SqlJsDatabase | null = null;
 let saveDebounceTimer: NodeJS.Timeout | null = null;
@@ -50,14 +53,46 @@ export async function getDb(): Promise<SqlJsDatabase> {
     return dbInstance;
   }
 
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(BACKUP_DIR)) {
-    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+  } catch (e) {
+    console.warn('Could not create DATA_DIR:', e);
   }
 
-  const SQL = await initSqlJs();
+  try {
+    if (!fs.existsSync(BACKUP_DIR)) {
+      fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    }
+  } catch (e) {
+    console.warn('Could not create BACKUP_DIR:', e);
+  }
+
+  // In Vercel serverless, copy pre-seeded SQLite file from repository if /tmp is fresh
+  if (isVercel && !fs.existsSync(DB_FILE)) {
+    const bundledPath = path.join(process.cwd(), 'data', 'kasir_umkm.sqlite');
+    if (fs.existsSync(bundledPath)) {
+      try {
+        fs.copyFileSync(bundledPath, DB_FILE);
+      } catch (err) {
+        console.warn('Could not copy bundled SQLite file to /tmp:', err);
+      }
+    }
+  }
+
+  const SQL = await initSqlJs({
+    locateFile: (file) => {
+      const candidates = [
+        path.join(process.cwd(), 'node_modules', 'sql.js', 'dist', file),
+        path.join(process.cwd(), file),
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(c)) return c;
+      }
+      return file;
+    },
+  });
 
   if (fs.existsSync(DB_FILE)) {
     try {
@@ -93,8 +128,8 @@ export async function getDb(): Promise<SqlJsDatabase> {
   }
   const db = dbInstance;
 
-  // Start periodic backup interval (every 1 hour)
-  if (!backupIntervalTimer) {
+  // Start periodic backup interval (every 1 hour for long-running servers)
+  if (!isVercel && !backupIntervalTimer) {
     backupIntervalTimer = setInterval(() => {
       createBackup();
     }, 60 * 60 * 1000);

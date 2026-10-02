@@ -15,13 +15,20 @@ import {
   Layers,
   ShoppingBag,
   Coins,
+  Wallet,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
+import FinancialReportModal from '../components/FinancialReportModal.tsx';
+import SalesReportModal from '../components/SalesReportModal.tsx';
 
 export default function ReportsView() {
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<any | null>(null);
   const [topProducts, setTopProducts] = useState<any[]>([]);
+
+  // Print Modals
+  const [isFinancialModalOpen, setIsFinancialModalOpen] = useState(false);
+  const [isSalesModalOpen, setIsSalesModalOpen] = useState(false);
 
   // Filter States
   const [preset, setPreset] = useState<'today' | 'week' | 'month' | 'custom'>('today');
@@ -173,11 +180,20 @@ export default function ReportsView() {
             <span>Unduh Excel/CSV</span>
           </button>
           <button
-            onClick={() => window.print()}
+            onClick={() => setIsFinancialModalOpen(true)}
+            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-2xs transition-colors cursor-pointer"
+            title="Buka pratinjau dan cetak Laporan Keuangan & Buku Kas"
+          >
+            <Wallet className="w-4 h-4" />
+            <span>Cetak Laporan Keuangan</span>
+          </button>
+          <button
+            onClick={() => setIsSalesModalOpen(true)}
             className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-2xs transition-colors cursor-pointer"
+            title="Buka pratinjau dan cetak Laporan Rincian Penjualan Produk"
           >
             <Printer className="w-4 h-4" />
-            <span>Cetak Laporan</span>
+            <span>Cetak Laporan Penjualan</span>
           </button>
         </div>
       </div>
@@ -484,6 +500,22 @@ export default function ReportsView() {
           )}
         </div>
       </div>
+
+      {/* 1. Modal Cetak Laporan Keuangan */}
+      <FinancialReportModal
+        isOpen={isFinancialModalOpen}
+        onClose={() => setIsFinancialModalOpen(false)}
+        initialStartDate={startDate}
+        initialEndDate={endDate}
+      />
+
+      {/* 2. Modal Cetak Laporan Penjualan */}
+      <SalesReportModal
+        isOpen={isSalesModalOpen}
+        onClose={() => setIsSalesModalOpen(false)}
+        initialStartDate={startDate}
+        initialEndDate={endDate}
+      />
     </div>
   );
 }

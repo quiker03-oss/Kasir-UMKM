@@ -58,6 +58,7 @@ export default function OnlineOrdersView() {
       const res = await api.updateOrderStatus(orderId, { status: newStatus });
       if (res.success) {
         setNotification({ message: `Status pesanan berhasil diubah menjadi "${newStatus}".`, type: 'success' });
+        window.dispatchEvent(new CustomEvent('order:status_updated'));
         loadOrders();
       }
     } catch (err: any) {
@@ -71,6 +72,7 @@ export default function OnlineOrdersView() {
     try {
       await api.deleteOrder(deleteOrderTarget.id);
       setNotification({ message: `Pesanan #${deleteOrderTarget.order_number} berhasil dihapus.`, type: 'success' });
+      window.dispatchEvent(new CustomEvent('order:status_updated'));
       setDeleteOrderTarget(null);
       loadOrders();
     } catch (err: any) {

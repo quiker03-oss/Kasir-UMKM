@@ -38,15 +38,33 @@ async function request<T = any>(endpoint: string, options: RequestInit = {}): Pr
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(endpoint, {
-    ...options,
-    headers,
-  });
+  // Prepend VITE_API_URL if configured for external API hosting, otherwise use relative path
+  const apiBase = (import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '');
+  const url = endpoint.startsWith('http') ? endpoint : `${apiBase}${endpoint}`;
 
-  const data = await res.json().catch(() => ({ success: false, message: 'Gagal memproses respon server.' }));
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers,
+    });
+  } catch (netErr: any) {
+    console.error('Network/Connection error:', netErr);
+    throw new Error('Terjadi masalah koneksi server. Silakan coba lagi.');
+  }
+
+  const data = await res.json().catch(() => ({
+    success: false,
+    message: res.status === 404
+      ? 'Endpoint server tidak ditemukan (404).'
+      : 'Terjadi masalah koneksi server. Silakan coba lagi.',
+  }));
 
   if (!res.ok) {
-    throw new Error(data.message || 'Terjadi kesalahan sistem.');
+    throw new Error(
+      data.message ||
+        (res.status === 401 ? 'Username atau password salah.' : 'Terjadi masalah koneksi server. Silakan coba lagi.')
+    );
   }
 
   return data;
@@ -218,6 +236,47 @@ export const api = {
     if (params?.product_id) q.append('product_id', params.product_id);
     return request(`/api/reports/finance?${q.toString()}`);
   },
+  getFinancialLedgerReport: (params?: {
+    start_date?: string;
+    end_date?: string;
+    transaction_type?: string;
+    category?: string;
+    cashier_id?: string;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.start_date) q.append('start_date', params.start_date);
+    if (params?.end_date) q.append('end_date', params.end_date);
+    if (params?.transaction_type) q.append('transaction_type', params.transaction_type);
+    if (params?.category) q.append('category', params.category);
+    if (params?.cashier_id) q.append('cashier_id', params.cashier_id);
+    return request(`/api/reports/financial-ledger?${q.toString()}`);
+  },
+  getDetailedSalesReport: (params?: {
+    start_date?: string;
+    end_date?: string;
+    cashier_id?: string;
+    payment_method?: string;
+    product_id?: string;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.start_date) q.append('start_date', params.start_date);
+    if (params?.end_date) q.append('end_date', params.end_date);
+    if (params?.cashier_id) q.append('cashier_id', params.cashier_id);
+    if (params?.payment_method) q.append('payment_method', params.payment_method);
+    if (params?.product_id) q.append('product_id', params.product_id);
+    return request(`/api/reports/sales-detailed?${q.toString()}`);
+  },
+  querySalarySlip: (params?: {
+    employee_id?: string;
+    period_month?: number;
+    period_year?: number;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.employee_id) q.append('employee_id', params.employee_id);
+    if (params?.period_month) q.append('period_month', String(params.period_month));
+    if (params?.period_year) q.append('period_year', String(params.period_year));
+    return request(`/api/payroll/slip-query?${q.toString()}`);
+  },
   getTopProducts: (params?: { start_date?: string; end_date?: string; limit?: number }) => {
     const q = new URLSearchParams();
     if (params?.start_date) q.append('start_date', params.start_date);
@@ -227,11 +286,12 @@ export const api = {
   },
 
   // Dashboard
-  getDashboardStats: (params?: { today?: string }) => {
+  getDashboardStats: (params?: { today?: string; period?: string }) => {
     const q = new URLSearchParams();
     if (params?.today) q.append('today', params.today);
+    if (params?.period) q.append('period', params.period);
     const queryStr = q.toString();
-    return request(`/api/dashboard/stats${queryStr ? '?' + queryStr : ''}`);
+    return request<any>(`/api/dashboard/stats${queryStr ? '?' + queryStr : ''}`);
   },
 };
 

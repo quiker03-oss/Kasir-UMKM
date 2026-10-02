@@ -164,14 +164,20 @@ export default function PayrollView() {
       period_month: selectedPayroll.period_month,
       period_year: selectedPayroll.period_year,
       paid_at: selectedPayroll.paid_at,
+      payment_status: selectedPayroll.status,
       employee_id: item.employee_id,
       employee_name: item.employee_name,
       position: item.position,
+      barcode_id: (item as any).barcode_id,
       attendance_count: item.attendance_count,
       base_salary: item.base_salary,
+      allowance: 0,
       bonus: item.bonus,
       overtime: item.overtime,
+      other_income: 0,
       deductions: item.deductions,
+      cash_advance: 0,
+      other_deductions: 0,
       net_salary: item.net_salary,
       notes: item.notes,
       store: storeInfo,
@@ -186,14 +192,20 @@ export default function PayrollView() {
       period_month: selectedPayroll.period_month,
       period_year: selectedPayroll.period_year,
       paid_at: selectedPayroll.paid_at,
+      payment_status: selectedPayroll.status,
       employee_id: item.employee_id,
       employee_name: item.employee_name,
       position: item.position,
+      barcode_id: item.barcode_id,
       attendance_count: item.attendance_count,
       base_salary: item.base_salary,
+      allowance: 0,
       bonus: item.bonus,
       overtime: item.overtime,
+      other_income: 0,
       deductions: item.deductions,
+      cash_advance: 0,
+      other_deductions: 0,
       net_salary: item.net_salary,
       notes: item.notes,
       store: storeInfo,
@@ -214,13 +226,27 @@ export default function PayrollView() {
           </p>
         </div>
 
-        <button
-          onClick={() => setIsCreateOpen(true)}
-          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-2xs self-start"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Buat Penggajian Periode Baru</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => {
+              setAllPeriodSlips([]);
+              setSlipData(null);
+              setIsSlipModalOpen(true);
+            }}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-2xs transition-colors cursor-pointer"
+            title="Buka dan cetak Slip Gaji karyawan berdasarkan pilihan nama dan periode"
+          >
+            <Printer className="w-4 h-4" />
+            <span>Cetak Slip Gaji</span>
+          </button>
+          <button
+            onClick={() => setIsCreateOpen(true)}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-2xs cursor-pointer transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Buat Penggajian Periode Baru</span>
+          </button>
+        </div>
       </div>
 
       {/* Payroll Periods List */}

@@ -250,6 +250,7 @@ export default function PublicCustomerStore({
 
         // Broadcast event so cashier sees incoming order immediately
         window.dispatchEvent(new CustomEvent('orders:updated', { detail: res.order }));
+        window.dispatchEvent(new CustomEvent('order:placed', { detail: res.order }));
       } else {
         setCheckoutError(res.message || 'Gagal membuat pesanan. Silakan periksa formulir.');
       }

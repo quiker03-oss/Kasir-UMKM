@@ -24,6 +24,144 @@ router.get('/', (req: AuthRequest, res: Response) => {
   }
 });
 
+// Query slip gaji by employee and period (Bulan & Tahun)
+router.get('/slip-query', (req: AuthRequest, res: Response) => {
+  try {
+    const storeId = (req as any).storeId;
+    const { employee_id, period_month, period_year } = req.query;
+
+    const store = queryOne('SELECT id, name, address, phone, logo_url FROM stores WHERE id = ?', [storeId]) || {
+      name: 'Kasir UMKM',
+      address: '',
+      phone: '',
+    };
+
+    const allEmployees = query(
+      `SELECT id, name, position, barcode_id, base_salary, phone 
+       FROM employees 
+       WHERE store_id = ? AND is_active = 1 
+       ORDER BY name ASC`,
+      [storeId]
+    );
+
+    if (allEmployees.length === 0) {
+      res.json({
+        success: true,
+        store,
+        employees: [],
+        slip: null,
+        message: 'Belum ada karyawan aktif di toko ini.',
+      });
+      return;
+    }
+
+    const now = new Date();
+    const targetMonth = period_month ? Number(period_month) : now.getMonth() + 1;
+    const targetYear = period_year ? Number(period_year) : now.getFullYear();
+    const targetEmpId = employee_id && employee_id !== 'ALL' ? String(employee_id) : allEmployees[0]?.id;
+
+    const employee = allEmployees.find((e: any) => e.id === targetEmpId) || allEmployees[0];
+    if (!employee) {
+      res.json({ success: true, employees: allEmployees, slip: null });
+      return;
+    }
+
+    const monthStr = targetMonth < 10 ? `0${targetMonth}` : `${targetMonth}`;
+    const datePrefix = `${targetYear}-${monthStr}`;
+
+    // Check if recorded payroll exists for this store, month, and year
+    const existingPayroll = queryOne(
+      `SELECT p.* FROM payroll p WHERE p.store_id = ? AND p.period_month = ? AND p.period_year = ?`,
+      [storeId, targetMonth, targetYear]
+    );
+
+    let slipData: any = null;
+
+    if (existingPayroll) {
+      const recordedItem = queryOne(
+        `SELECT pi.* FROM payroll_items pi WHERE pi.payroll_id = ? AND pi.employee_id = ?`,
+        [existingPayroll.id, employee.id]
+      );
+
+      if (recordedItem) {
+        slipData = {
+          payroll_number: existingPayroll.payroll_number,
+          period_month: targetMonth,
+          period_year: targetYear,
+          paid_at: existingPayroll.paid_at || existingPayroll.created_at,
+          payment_status: existingPayroll.status || 'Dibayar',
+          employee_id: employee.id,
+          employee_name: employee.name,
+          position: employee.position,
+          barcode_id: employee.barcode_id,
+          attendance_count: recordedItem.attendance_count || 0,
+          // PENDAPATAN
+          base_salary: Number(recordedItem.base_salary) || 0,
+          allowance: 0, // Tunjangan
+          bonus: Number(recordedItem.bonus) || 0, // Bonus
+          overtime: Number(recordedItem.overtime) || 0, // Lembur
+          other_income: 0, // Pendapatan lainnya
+          // POTONGAN
+          deductions: Number(recordedItem.deductions) || 0, // Potongan
+          cash_advance: 0, // Kasbon
+          other_deductions: 0, // Potongan lainnya
+          // TOTAL GAJI
+          net_salary: Number(recordedItem.net_salary) || 0,
+          notes: recordedItem.notes || '',
+          store,
+        };
+      }
+    }
+
+    if (!slipData) {
+      // Dynamic computation from database
+      const attRes = queryOne(
+        `SELECT COUNT(*) as count FROM attendance WHERE store_id = ? AND employee_id = ? AND date LIKE ?`,
+        [storeId, employee.id, `${datePrefix}%`]
+      );
+      const attendanceCount = attRes ? Number(attRes.count) : 0;
+      const baseSalary = Number(employee.base_salary) || 0;
+
+      slipData = {
+        payroll_number: `SLIP-${targetYear}${monthStr}-${Math.floor(100 + Math.random() * 900)}`,
+        period_month: targetMonth,
+        period_year: targetYear,
+        paid_at: new Date().toISOString(),
+        payment_status: 'Draft',
+        employee_id: employee.id,
+        employee_name: employee.name,
+        position: employee.position,
+        barcode_id: employee.barcode_id,
+        attendance_count: attendanceCount,
+        // PENDAPATAN
+        base_salary: baseSalary,
+        allowance: 0,
+        bonus: 0,
+        overtime: 0,
+        other_income: 0,
+        // POTONGAN
+        deductions: 0,
+        cash_advance: 0,
+        other_deductions: 0,
+        // TOTAL GAJI
+        net_salary: baseSalary,
+        notes: '',
+        store,
+      };
+    }
+
+    res.json({
+      success: true,
+      employees: allEmployees,
+      slip: slipData,
+      store,
+    });
+  } catch (err: any) {
+    console.error('Slip query error:', err);
+    res.status(500).json({ success: false, message: 'Gagal memuat slip gaji.' });
+  }
+});
+
 // Get latest slip for a specific employee (used from EmployeesView or Payroll)
 router.get('/employee/:employeeId/slip', (req: AuthRequest, res: Response) => {
   try {

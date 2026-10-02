@@ -47,10 +47,24 @@ export default function LoginView({
       if (res.success && res.user && res.token) {
         onLoginSuccess(res.user, res.token);
       } else {
-        setErrorMessage(res.message || 'Login gagal. Periksa kembali username dan password.');
+        setErrorMessage(res.message || 'Username atau password salah.');
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Login gagal. Periksa kembali username dan password.');
+      const msg = (err?.message || '').toLowerCase();
+      if (
+        msg.includes('koneksi') ||
+        msg.includes('server') ||
+        msg.includes('network') ||
+        msg.includes('fetch') ||
+        msg.includes('tidak ditemukan') ||
+        msg.includes('500')
+      ) {
+        setErrorMessage('Terjadi masalah koneksi server. Silakan coba lagi.');
+      } else if (msg.includes('dinonaktifkan') || msg.includes('nonaktif')) {
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage('Username atau password salah.');
+      }
     } finally {
       setLoading(false);
     }

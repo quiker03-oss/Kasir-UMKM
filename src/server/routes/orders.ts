@@ -109,7 +109,12 @@ router.patch('/:id/status', (req: AuthRequest, res: Response) => {
         }
       }
 
-      const updatePayment = payment_status ? payment_status : order.payment_status;
+      let updatePayment = payment_status ? payment_status : order.payment_status;
+      if (!payment_status && status === 'Selesai') {
+        updatePayment = 'PAID';
+      } else if (!payment_status && status === 'Dibatalkan') {
+        updatePayment = 'CANCELLED';
+      }
       run('UPDATE orders SET status = ?, payment_status = ?, updated_at = ? WHERE id = ? AND store_id = ?', [
         status,
         updatePayment,
